@@ -101,7 +101,8 @@ object SbtMima {
       module <- config.modules
       (artifact, file) <- module.artifacts
       if artifact.name == m.name
-      if artifact.classifier.isEmpty
+      // TODO Can we handle this better?
+//      if artifact.classifier.isEmpty
     } yield file
     jars.toList match {
       case Nil             => sys.error(s"Could not resolve previous ABI: $m")

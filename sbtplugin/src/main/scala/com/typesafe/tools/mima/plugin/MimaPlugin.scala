@@ -1,8 +1,10 @@
 package com.typesafe.tools.mima
 package plugin
 
-import sbt.*, Keys.*
+import sbt.*
+import Keys.*
 import core.*
+import sbt.librarymanagement.{DependencyResolution, ScalaModuleInfo}
 
 /** MiMa's sbt plugin. */
 object MimaPlugin extends AutoPlugin {
@@ -19,6 +21,8 @@ object MimaPlugin extends AutoPlugin {
     mimaFailOnNoPrevious := true,
     mimaReportSignatureProblems := false,
     mimaCheckDirection := "backward",
+    mimaCurrentArtifactsOverride := NoCurrentArtifactsOverride,
+    mimaArtifactsClassifier := "",
   )
 
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
@@ -39,9 +43,11 @@ object MimaPlugin extends AutoPlugin {
     },
     mimaDependencyResolution := dependencyResolution.value,
     mimaPreviousClassfiles := {
-      artifactsToClassfiles.value.toClassfiles(mimaPreviousArtifacts.value)
+      artifactsToClassfiles.value.toClassfiles(mimaPreviousArtifacts.value, mimaArtifactsClassifier.value)
     },
-    mimaCurrentClassfiles := (Compile / classDirectory).value,
+    mimaCurrentClassfiles := {
+      currentArtifactsToClassfiles.value.toClassfiles(mimaCurrentArtifactsOverride.value, mimaArtifactsClassifier.value)
+    },
     mimaFindBinaryIssues := binaryIssuesIterator.value.toMap,
     mimaFindBinaryIssues / fullClasspath := (Compile / fullClasspath).value,
     mimaBackwardIssueFilters := SbtMima.issueFiltersFromFiles(mimaFiltersDirectory.value, "\\.(?:backward[s]?|both)\\.excludes".r, streams.value),
@@ -52,8 +58,37 @@ object MimaPlugin extends AutoPlugin {
   @deprecated("Switch to enablePlugins(MimaPlugin)", "0.7.0")
   def mimaDefaultSettings: Seq[Setting[_]] = globalSettings ++ buildSettings ++ projectSettings
 
+  trait CurrentArtifactsOverrideToClassfiles {
+    def toClassfiles(currentArtifactsOverride: Set[ModuleID], classifier: String): File
+  }
+
+  def currentArtifactsToClassfiles: Def.Initialize[Task[CurrentArtifactsOverrideToClassfiles]] = Def.task {
+    val depRes = mimaDependencyResolution.value
+    val taskStreams = streams.value
+    val smi = scalaModuleInfo.value
+
+    (currentArtifactsOverride, classifier) => currentArtifactsOverride match {
+      case NoCurrentArtifactsOverride => (Compile / classDirectory).value
+      // TODO Is there a better way to get a single artifact for the override?
+      case _                          => constructArtifactsMap(currentArtifactsOverride, classifier, depRes, taskStreams, smi).head._2
+    }
+  }
+
+  def constructArtifactsMap(artifacts: Set[ModuleID], classifier: String, depRes: DependencyResolution, taskStreams: Keys.TaskStreams, smi: Option[ScalaModuleInfo]): Map[ModuleID, File] = {
+    artifacts.iterator.map { m =>
+      val moduleId = CrossVersion(m, smi) match {
+        case Some(f) => classifier.isEmpty match {
+          case true  => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
+          case false => m.withName(f(m.name)).classifier(classifier).withCrossVersion(CrossVersion.disabled)
+        }
+        case None => m
+      }
+      moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams)
+    }.toMap
+  }
+
   trait ArtifactsToClassfiles {
-    def toClassfiles(previousArtifacts: Set[ModuleID]): Map[ModuleID, File]
+    def toClassfiles(previousArtifacts: Set[ModuleID], classifier: String): Map[ModuleID, File]
   }
 
   trait BinaryIssuesFinder {
@@ -65,16 +100,10 @@ object MimaPlugin extends AutoPlugin {
     val depRes = mimaDependencyResolution.value
     val taskStreams = streams.value
     val smi = scalaModuleInfo.value
-    previousArtifacts => previousArtifacts match {
+
+    (previousArtifacts, classifier) => previousArtifacts match {
       case _: NoPreviousArtifacts.type => NoPreviousClassfiles
-      case previousArtifacts =>
-        previousArtifacts.iterator.map { m =>
-          val moduleId = CrossVersion(m, smi) match {
-            case Some(f) => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
-            case None => m
-          }
-          moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams)
-        }.toMap
+      case previousArtifacts => constructArtifactsMap(previousArtifacts, classifier, depRes, taskStreams, smi)
     }
   }
 
@@ -115,6 +144,9 @@ object MimaPlugin extends AutoPlugin {
   // Used to differentiate unset mimaPreviousArtifacts from empty mimaPreviousArtifacts
   private object NoPreviousArtifacts extends EmptySet[ModuleID]
   private object NoPreviousClassfiles extends EmptyMap[ModuleID, File]
+
+  // Used to differentiate unset NoCurrentArtifactsOverride from default behavior
+  private object NoCurrentArtifactsOverride extends EmptySet[ModuleID]
 
   private sealed class EmptySet[A] extends Set[A] {
     def iterator          = Iterator.empty
