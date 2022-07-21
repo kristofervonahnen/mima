@@ -38,6 +38,7 @@ object MimaPlugin extends AutoPlugin {
           mimaForwardIssueFilters.value,
           streams.value.log,
           name.value,
+          mimaArtifactsClassifier.value,
         )
       }
     },
@@ -75,15 +76,17 @@ object MimaPlugin extends AutoPlugin {
   }
 
   def constructArtifactsMap(artifacts: Set[ModuleID], classifier: String, depRes: DependencyResolution, taskStreams: Keys.TaskStreams, smi: Option[ScalaModuleInfo]): Map[ModuleID, File] = {
+    val classifierOpt: Option[String] = if (classifier.isEmpty) None else Some(classifier)
+
     artifacts.iterator.map { m =>
       val moduleId = CrossVersion(m, smi) match {
-        case Some(f) => classifier.isEmpty match {
-          case true  => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
-          case false => m.withName(f(m.name)).classifier(classifier).withCrossVersion(CrossVersion.disabled)
+        case Some(f) => classifierOpt match {
+          case None  => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
+          case Some(c) => m.withName(f(m.name)).classifier(c).withCrossVersion(CrossVersion.disabled)
         }
         case None => m
       }
-      moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams)
+      moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams, classifierOpt)
     }.toMap
   }
 

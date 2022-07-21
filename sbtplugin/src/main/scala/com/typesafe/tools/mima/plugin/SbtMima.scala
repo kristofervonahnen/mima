@@ -52,6 +52,7 @@ object SbtMima {
       forwardFilters: Map[String, Seq[ProblemFilter]],
       logger: Logger,
       projectName: String,
+      classifier: String,
   ): Unit = {
     // filters * found is n-squared, it's fixable in principle by special-casing known
     // filter types or something, not worth it most likely...
@@ -75,11 +76,11 @@ object SbtMima {
     def logResult(msg: String) = doLog(s"$projectName: $msg")
 
     if (count == 0) {
-      logResult(s"Binary compatibility check against $module passed.")
+      logResult(s"Binary compatibility check against $module (classifier: $classifier) passed.")
     } else {
       val filteredCount = backward.size + forward.size - count
       val filteredNote = if (filteredCount > 0) s" (filtered $filteredCount)" else ""
-      val msg = s"Failed binary compatibility check against $module! Found $count potential problems$filteredNote"
+      val msg = s"Failed binary compatibility check against $module (classifier: $classifier)! Found $count potential problems$filteredNote"
 
       logResult(msg)
       for (p <- backErrors) doLog(pretty("current")(p))
@@ -91,21 +92,22 @@ object SbtMima {
   }
 
   /** Resolves an artifact representing the previous abstract binary interface for testing. */
-  def getPreviousArtifact(m: ModuleID, depRes: DependencyResolution, s: TaskStreams): File = {
+  // TODO This is now a misnomer!
+  def getPreviousArtifact(m: ModuleID, depRes: DependencyResolution, s: TaskStreams, classifier: Option[String]): File = {
     val module = depRes.wrapDependencyInModule(m)
     val uc = UpdateConfiguration().withLogging(UpdateLogging.DownloadOnly)
     val uwc = UnresolvedWarningConfiguration()
     val report = depRes.update(module, uc, uwc, s.log).left.map(_.resolveException).toTry.get
+
     val jars = for {
       config <- report.configurations.iterator
       module <- config.modules
       (artifact, file) <- module.artifacts
       if artifact.name == m.name
-      // TODO Can we handle this better?
-//      if artifact.classifier.isEmpty
+      if artifact.classifier == classifier
     } yield file
     jars.toList match {
-      case Nil             => sys.error(s"Could not resolve previous ABI: $m")
+      case Nil             => sys.error(s"Could not resolve previous ABI: $m (classifier: $classifier)")
       case jar :: moreJars =>
         if (moreJars.nonEmpty)
           s.log.debug(s"Returning $jar and ignoring $moreJars for $m")
