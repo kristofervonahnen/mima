@@ -21,8 +21,8 @@ object MimaPlugin extends AutoPlugin {
     mimaFailOnNoPrevious := true,
     mimaReportSignatureProblems := false,
     mimaCheckDirection := "backward",
-    mimaCurrentArtifactsOverride := NoCurrentArtifactsOverride,
-    mimaArtifactsClassifier := "",
+    mimaUseSbtAssemblyArtifact := false,
+    mimaSbtAssemblyArtifactJarName := "",
   )
 
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
@@ -38,16 +38,22 @@ object MimaPlugin extends AutoPlugin {
           mimaForwardIssueFilters.value,
           streams.value.log,
           name.value,
-          mimaArtifactsClassifier.value,
+          if (mimaUseSbtAssemblyArtifact.value) "assembly" else "none", // TODO Would be good to determine classifier via a method.
         )
       }
     },
     mimaDependencyResolution := dependencyResolution.value,
     mimaPreviousClassfiles := {
-      artifactsToClassfiles.value.toClassfiles(mimaPreviousArtifacts.value, mimaArtifactsClassifier.value)
+      artifactsToClassfiles.value.toClassfiles(mimaPreviousArtifacts.value)
     },
     mimaCurrentClassfiles := {
-      currentArtifactsToClassfiles.value.toClassfiles(mimaCurrentArtifactsOverride.value, mimaArtifactsClassifier.value)
+      mimaUseSbtAssemblyArtifact.value match {
+        case true => {
+          sbtAssemblyRunner.value.run() // TODO Need to monitor and handle sbtAssemblyRunner.value.run failures.
+          currentSbtAssemblyArtifactsToClassfiles.value.toClassfiles()
+        }
+        case false => (Compile / classDirectory).value
+      }
     },
     mimaFindBinaryIssues := binaryIssuesIterator.value.toMap,
     mimaFindBinaryIssues / fullClasspath := (Compile / fullClasspath).value,
@@ -59,39 +65,24 @@ object MimaPlugin extends AutoPlugin {
   @deprecated("Switch to enablePlugins(MimaPlugin)", "0.7.0")
   def mimaDefaultSettings: Seq[Setting[_]] = globalSettings ++ buildSettings ++ projectSettings
 
-  trait CurrentArtifactsOverrideToClassfiles {
-    def toClassfiles(currentArtifactsOverride: Set[ModuleID], classifier: String): File
+  trait CurrentSbtAssemblyArtifactsToClassfiles {
+    def toClassfiles(): File
   }
 
-  def currentArtifactsToClassfiles: Def.Initialize[Task[CurrentArtifactsOverrideToClassfiles]] = Def.task {
-    val depRes = mimaDependencyResolution.value
-    val taskStreams = streams.value
-    val smi = scalaModuleInfo.value
+  def currentSbtAssemblyArtifactsToClassfiles: Def.Initialize[Task[CurrentSbtAssemblyArtifactsToClassfiles]] = Def.task {
+    () => {
+      val assemblyJarName = mimaSbtAssemblyArtifactJarName.value match {
+        case "" => s"${artifact.value.name}-assembly-${version.value}.jar"
+        case _  => mimaSbtAssemblyArtifactJarName.value
+      }
 
-    (currentArtifactsOverride, classifier) => currentArtifactsOverride match {
-      case NoCurrentArtifactsOverride => (Compile / classDirectory).value
-      // TODO Is there a better way to get a single artifact for the override?
-      case _                          => constructArtifactsMap(currentArtifactsOverride, classifier, depRes, taskStreams, smi).head._2
+      // TODO There must be a better way to get this file path...
+      (Compile / classDirectory).value / s"../$assemblyJarName"
     }
   }
 
-  def constructArtifactsMap(artifacts: Set[ModuleID], classifier: String, depRes: DependencyResolution, taskStreams: Keys.TaskStreams, smi: Option[ScalaModuleInfo]): Map[ModuleID, File] = {
-    val classifierOpt: Option[String] = if (classifier.isEmpty) None else Some(classifier)
-
-    artifacts.iterator.map { m =>
-      val moduleId = CrossVersion(m, smi) match {
-        case Some(f) => classifierOpt match {
-          case None  => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
-          case Some(c) => m.withName(f(m.name)).classifier(c).withCrossVersion(CrossVersion.disabled)
-        }
-        case None => m
-      }
-      moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams, classifierOpt)
-    }.toMap
-  }
-
   trait ArtifactsToClassfiles {
-    def toClassfiles(previousArtifacts: Set[ModuleID], classifier: String): Map[ModuleID, File]
+    def toClassfiles(previousArtifacts: Set[ModuleID]): Map[ModuleID, File]
   }
 
   trait BinaryIssuesFinder {
@@ -103,10 +94,17 @@ object MimaPlugin extends AutoPlugin {
     val depRes = mimaDependencyResolution.value
     val taskStreams = streams.value
     val smi = scalaModuleInfo.value
-
-    (previousArtifacts, classifier) => previousArtifacts match {
+    val classifier = if (mimaUseSbtAssemblyArtifact.value) Some("assembly") else None
+    previousArtifacts => previousArtifacts match {
       case _: NoPreviousArtifacts.type => NoPreviousClassfiles
-      case previousArtifacts => constructArtifactsMap(previousArtifacts, classifier, depRes, taskStreams, smi)
+      case previousArtifacts =>
+        previousArtifacts.iterator.map { m =>
+          val moduleId = CrossVersion(m, smi) match {
+            case Some(f) => m.withName(f(m.name)).withCrossVersion(CrossVersion.disabled)
+            case None => m
+          }
+          moduleId -> SbtMima.getPreviousArtifact(moduleId, depRes, taskStreams, classifier)
+        }.toMap
     }
   }
 
@@ -174,5 +172,38 @@ object MimaPlugin extends AutoPlugin {
     override def updated[V1 >: V](key: K, value: V1)        = Map(key -> value)
 
     override def apply(key: K) = throw new NoSuchElementException(s"key not found: $key")
+  }
+
+  trait SbtAssemblyRunner {
+    def run(): Unit
+  }
+
+  val sbtAssemblyRunner: Def.Initialize[Task[SbtAssemblyRunner]] = Def.task {
+    val currentState = state.value
+
+    () => {
+      val cmd = s"${artifact.value.name}/assembly"
+      val result = Command.process(cmd, currentState) // TODO Determine what to do with the result.
+    }
+  }
+
+  /**
+   * Convert the given command string to a release step action, preserving and      invoking remaining commands
+   * Note: This was copied from https://github.com/sbt/sbt-release/blob/663cfd426361484228a21a1244b2e6b0f7656bdf/src/main/scala/ReleasePlugin.scala#L99-L115
+   */
+  def runCommandAndRemaining(command: String): State => State = { st: State =>
+    import sbt.complete.Parser
+    @annotation.tailrec
+    def runCommand(command: String, state: State): State = {
+      val nextState = Parser.parse(command, state.combinedParser) match {
+        case Right(cmd) => cmd()
+        case Left(msg) => throw sys.error(s"Invalid programmatic input:\n$msg")
+      }
+      nextState.remainingCommands.toList match {
+        case Nil => nextState
+        case head :: tail => runCommand(head.commandLine, nextState.copy(remainingCommands = tail))
+      }
+    }
+    runCommand(command, st.copy(remainingCommands = Nil)).copy(remainingCommands = st.remainingCommands)
   }
 }

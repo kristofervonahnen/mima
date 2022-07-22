@@ -26,6 +26,6 @@ class MimaKeys {
   final val mimaForwardIssueFilters  = taskKey[Map[String, Seq[ProblemFilter]]]("Filters to apply to binary issues found grouped by version of a module checked against. These filters only apply to forward compatibility checking.")
   final val mimaFiltersDirectory     = settingKey[File]("Directory containing issue filters.")
 
-  final val mimaCurrentArtifactsOverride  = settingKey[Set[ModuleID]]("TODO")
-  final val mimaArtifactsClassifier = settingKey[String]("TODO")
+  final val mimaUseSbtAssemblyArtifact     = settingKey[Boolean]("TODO")
+  final val mimaSbtAssemblyArtifactJarName = settingKey[String]("TODO")
 }
